@@ -23,7 +23,6 @@ import com.asfoundation.wallet.transactions.TransactionsAnalytics;
 import com.asfoundation.wallet.ui.AppcoinsApps;
 import com.asfoundation.wallet.ui.appcoins.applications.AppcoinsApplication;
 import com.asfoundation.wallet.ui.iab.FiatValue;
-import com.asfoundation.wallet.ui.widget.entity.TransactionsModel;
 import com.asfoundation.wallet.ui.widget.holder.CardNotificationAction;
 import io.reactivex.Completable;
 import io.reactivex.Observable;
@@ -35,6 +34,7 @@ import io.reactivex.schedulers.Schedulers;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.Collections;
+import java.util.List;
 
 public class TransactionsViewModel extends BaseViewModel {
   private static final long GET_BALANCE_INTERVAL = 10 * DateUtils.SECOND_IN_MILLIS;
@@ -43,9 +43,11 @@ public class TransactionsViewModel extends BaseViewModel {
   private static final BigDecimal MINUS_ONE = new BigDecimal("-1");
   private final MutableLiveData<NetworkInfo> defaultNetwork = new MutableLiveData<>();
   private final MutableLiveData<Wallet> defaultWallet = new MutableLiveData<>();
-  private final MutableLiveData<TransactionsModel> transactionsModel = new MutableLiveData<>();
-  private final MutableLiveData<CardNotification> dismissNotification = new MutableLiveData<>();
+  private final MutableLiveData<List<Transaction>> transactions = new MutableLiveData<>();
   private final MutableLiveData<Boolean> showNotification = new MutableLiveData<>();
+  private final MutableLiveData<List<AppcoinsApplication>> appcoinsApplications =
+      new MutableLiveData<>();
+  private final MutableLiveData<List<CardNotification>> cardNotifications = new MutableLiveData<>();
   private final MutableLiveData<GlobalBalance> defaultWalletBalance = new MutableLiveData<>();
   private final MutableLiveData<Double> gamificationMaxBonus = new MutableLiveData<>();
   private final MutableLiveData<Double> fetchTransactionsError = new MutableLiveData<>();
@@ -88,12 +90,8 @@ public class TransactionsViewModel extends BaseViewModel {
     return defaultWallet;
   }
 
-  public LiveData<TransactionsModel> transactionsModel() {
-    return transactionsModel;
-  }
-
-  public LiveData<CardNotification> dismissNotification() {
-    return dismissNotification;
+  public LiveData<List<Transaction>> transactions() {
+    return transactions;
   }
 
   public MutableLiveData<GlobalBalance> getDefaultWalletBalance() {
@@ -138,20 +136,12 @@ public class TransactionsViewModel extends BaseViewModel {
     if (fetchTransactionsDisposable != null && !fetchTransactionsDisposable.isDisposed()) {
       fetchTransactionsDisposable.dispose();
     }
-
     fetchTransactionsDisposable =
         transactionViewInteract.fetchTransactions(defaultWallet.getValue())
-            .flatMapSingle(transactions -> transactionViewInteract.getCardNotifications()
-                .onErrorReturnItem(Collections.emptyList())
-                .flatMap(notifications -> applications.getApps()
-                    .onErrorReturnItem(Collections.emptyList())
-                    .map(applications -> new TransactionsModel(transactions, notifications,
-                        applications))))
-            .subscribeOn(Schedulers.io())
             .observeOn(AndroidSchedulers.mainThread())
             .flatMapCompletable(
-                transactionsModel -> publishMaxBonus().observeOn(AndroidSchedulers.mainThread())
-                    .andThen(onTransactionModel(transactionsModel))
+                transactions -> publishMaxBonus().observeOn(AndroidSchedulers.mainThread())
+                    .andThen(onTransactions(transactions))
                     .andThen(Completable.fromAction(this::onTransactionsFetchCompleted)))
             .onErrorResumeNext(throwable -> publishMaxBonus())
             .observeOn(AndroidSchedulers.mainThread())
@@ -159,6 +149,37 @@ public class TransactionsViewModel extends BaseViewModel {
             .subscribe(() -> {
             }, this::onError);
     disposables.add(fetchTransactionsDisposable);
+
+    if (shouldShowProgress) {
+      fetchCardNotifications();
+    }
+  }
+
+  private void fetchApps() {
+    disposables.add(applications.getApps()
+        .subscribeOn(Schedulers.io())
+        .map(appcoinsApplications -> {
+          Collections.shuffle(appcoinsApplications);
+          return appcoinsApplications;
+        })
+        .observeOn(AndroidSchedulers.mainThread())
+        .doOnSubscribe(disposable -> appcoinsApplications.postValue(Collections.emptyList()))
+        .subscribe(appcoinsApplications::postValue, Throwable::printStackTrace));
+  }
+
+  private void fetchCardNotifications() {
+    disposables.add(transactionViewInteract.getCardNotifications()
+        .doOnSuccess(notifications -> {
+          cardNotifications.postValue(notifications);
+          if (notifications.isEmpty()) fetchApps();
+        })
+        .doOnError(disposable1 -> {
+          cardNotifications.postValue(Collections.emptyList());
+          fetchApps();
+        })
+        .subscribeOn(Schedulers.io())
+        .observeOn(AndroidSchedulers.mainThread())
+        .subscribe());
   }
 
   private void getGlobalBalance() {
@@ -254,15 +275,12 @@ public class TransactionsViewModel extends BaseViewModel {
     fetchTransactions(true);
   }
 
-  private Completable onTransactionModel(TransactionsModel transactionsModel) {
+  private Completable onTransactions(List<Transaction> transactions) {
     return Completable.fromAction(() -> {
-      transactionsModel.getTransactions();
-      hasTransactions = !transactionsModel.getTransactions()
-          .isEmpty() || hasTransactions;
-      this.transactionsModel.setValue(transactionsModel);
+      hasTransactions = (transactions != null && !transactions.isEmpty()) || hasTransactions;
+      this.transactions.setValue(transactions);
       Boolean last = progress.getValue();
-      if (transactionsModel.getTransactions()
-          .size() > 0 && last != null && last) {
+      if (transactions != null && transactions.size() > 0 && last != null && last) {
         progress.postValue(true);
       }
     });
@@ -299,6 +317,14 @@ public class TransactionsViewModel extends BaseViewModel {
   public void pause() {
     handler.removeCallbacks(startFetchTransactionsTask);
     handler.removeCallbacks(startGlobalBalanceTask);
+  }
+
+  public LiveData<List<AppcoinsApplication>> applications() {
+    return appcoinsApplications;
+  }
+
+  public LiveData<List<CardNotification>> notifications() {
+    return cardNotifications;
   }
 
   public void onAppClick(AppcoinsApplication appcoinsApplication, Context context) {
@@ -355,6 +381,6 @@ public class TransactionsViewModel extends BaseViewModel {
 
   private void dismissNotification(CardNotification cardNotification) {
     disposables.add(transactionViewInteract.dismissNotification(cardNotification)
-        .subscribe(() -> dismissNotification.postValue(cardNotification), this::onError));
+        .subscribe(this::fetchCardNotifications, this::onError));
   }
 }
